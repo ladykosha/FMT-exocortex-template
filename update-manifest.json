@@ -152,6 +152,10 @@
       "sha256": "adf731c45bc3d17251e86684098fb7cf5ab581072999533bb44d097427628eff"
     },
     {
+      "path": ".claude/hooks/secret-bypass-analyzer.py",
+      "sha256": "2c02530b2c6df105016c02a4bb6fdefe4a4d4dbd424c943b58a85283febf8042"
+    },
+    {
       "path": ".claude/hooks/secret-bypass-lib.sh",
       "sha256": "a1123577daa3526a5507378dbe32916fe771ab0f3b2d49df0f79076df3d6fcb8"
     },
@@ -2070,6 +2074,18 @@
     {
       "path": "scripts/build-active-wp.py",
       "sha256": "3f05bee2a8b00ab5afaf117d2276f26464c6cd0ba23688f683b69b697a652c40"
+    },
+    {
+      "path": "scripts/canon-dirty-proposals.sh",
+      "sha256": "4f33b3658380441d0e2dd93697f538206c7ded1ad8fc3d80a08614ed64de4901"
+    },
+    {
+      "path": "scripts/canon-dirty-snapshot.sh",
+      "sha256": "ab297ff262ef9bed3ce72123a70c4569dd4e32eb9340a53bfd1875fc508837ff"
+    },
+    {
+      "path": "scripts/canon-reconcile-published.sh",
+      "sha256": "3dc026a0f8dbd2e135f585528f2da21dfddc0922d94c82e7ef2d5e8251bf17b2"
     },
     {
       "path": "scripts/canon-dirty-proposals.sh",

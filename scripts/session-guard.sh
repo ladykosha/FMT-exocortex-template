@@ -1650,6 +1650,43 @@ if [ "$CMD" = "heartbeat" ]; then
   exit 0
 fi
 
+# --- HEARTBEAT ---
+# Exact-id only and no shell redirection: a delayed heartbeat can neither jump
+# to a newer pointer nor recreate `.open` after close.  The caller PID must be
+# a live ancestor of this guard process, which catches stale/replayed command
+# shapes without pretending that a PID is an authentication credential.
+if [ "$CMD" = "heartbeat" ]; then
+  [ -n "$AGENT" ] || fail "heartbeat требует --agent" 1
+  _safe_session_token "$AGENT" || fail "heartbeat: небезопасный --agent '$AGENT'" 1
+  [ -n "$SESSION_ID_ARG" ] || fail "heartbeat требует --session-id" 1
+  _safe_session_token "$SESSION_ID_ARG" || fail "heartbeat: небезопасный --session-id '$SESSION_ID_ARG'" 1
+  if [ -n "${IWE_SESSION_TRANSITION_FD:-}" ]; then
+    [ "${IWE_HEARTBEAT_OWNER_VALIDATED:-}" = "$OWNER_PID" ] \
+      || fail "heartbeat: owner proof не пережил lock re-entry" 1
+  else
+    _owner_pid_is_live_ancestor "$OWNER_PID" \
+      || fail "heartbeat: --owner-pid должен быть живым процессом-предком" 1
+    # The Python lock wrapper adds one process hop before exec. Preserve the
+    # already-checked call shape across that re-entry rather than depending on
+    # `ps`, which is unavailable in some sandboxed installations.
+    export IWE_HEARTBEAT_OWNER_VALIDATED="$OWNER_PID"
+  fi
+  [ "${#POSITIONAL[@]}" -eq 0 ] || fail "heartbeat не принимает позиционные аргументы" 1
+  [ -z "$WP$TASK$FILES$SLUG$HOUSEKEEPING$PERSONALITY$FORCE_NO_REFLECTION$CLOSE_PATH" ] \
+    || fail "heartbeat принимает только --agent/--session-id/--owner-pid" 1
+
+  SEM_FILE="$SESSION_DIR/${AGENT}-${SESSION_ID_ARG}.open"
+  [ -f "$SEM_FILE" ] || fail "heartbeat: exact сессия ${AGENT}-${SESSION_ID_ARG} не открыта" 3
+  _ensure_session_transition_lock "$SEM_FILE" "$SESSION_ID_ARG"
+  _locked_open_identity "$SEM_FILE" "$AGENT" "$SESSION_ID_ARG" 0 \
+    || fail "heartbeat: open-семафор не прошёл exact identity/no-terminal проверку" 1
+  _atomic_append_open "$SEM_FILE" "$AGENT" "$SESSION_ID_ARG" heartbeat \
+    "heartbeat_at: $(now_iso)" "heartbeat_pid: $OWNER_PID" \
+    || fail "heartbeat: атомарная запись отклонена; сессия могла начать close" 1
+  echo "Heartbeat: ${AGENT}-${SESSION_ID_ARG}"
+  exit 0
+fi
+
 # --- helpers for ORZ validation ---
 # Ported from ~/IWE/scripts/session-guard.sh (root commit 2779845553, WP-484
 # line AC, 31.08): batches the git-tracked lookup for `audit` (one
