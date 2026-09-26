@@ -174,26 +174,6 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-# Publish one commit via scripts/ds-publish.sh. The script is not shipped with
-# the template (issue #884, regression of WP-7 Ф101): when it is absent, say so
-# and keep the commit local instead of failing on a bare "No such file".
-# Returns 0 only when the publisher reported success.
-publish_commit_or_explain() {
-    local reason="$1" sha="$2" ok_msg="$3" fail_msg="$4"
-    local publisher="$WORKSPACE/scripts/ds-publish.sh"
-
-    if [ ! -f "$publisher" ]; then
-        log "WARN: scripts/ds-publish.sh не установлен — коммит ${sha:0:12} остался локальным и не опубликован. Опубликуйте вручную: git -C \"$WORKSPACE\" push origin HEAD"
-        return 1
-    fi
-    if bash "$publisher" "$WORKSPACE" normal --reason "$reason" --from-commit "$sha" >> "$LOG_FILE" 2>&1; then
-        log "$ok_msg"
-        return 0
-    fi
-    log "$fail_msg"
-    return 1
-}
-
 notify() {
     local title="$1"
     local message="$2"
@@ -318,10 +298,12 @@ ${prompt}"
         # waiting for a clean window.
         local push_sha
         push_sha=$(git -C "$WORKSPACE" rev-parse HEAD)
-        # Outcome is logged inside; `|| true` only keeps `set -e` from ending
-        # the run over a publish that already reported its own failure.
-        publish_commit_or_explain "strategist: $command_file" "$push_sha" \
-            "Pushed to GitHub" "WARN: ds-publish.sh failed — публикация не удалась" || true
+        if bash "$WORKSPACE/scripts/ds-publish.sh" "$WORKSPACE" normal \
+            --reason "strategist: $command_file" --from-commit "$push_sha" >> "$LOG_FILE" 2>&1; then
+            log "Pushed to GitHub"
+        else
+            log "WARN: ds-publish.sh failed — публикация не удалась"
+        fi
     fi
 
     # Очистить staging area после Claude сессии (предотвращает staging leak в следующие скрипты)
@@ -333,71 +315,6 @@ ${prompt}"
     local summary
     summary=$(tail -5 "$LOG_FILE" | grep -v '^\[' | head -3)
     notify "Стратег: $command_file" "$summary"
-    return $rc
-}
-
-# issue #866: retry transient auth failures and leave a recoverable record.
-run_claude_with_retry() {
-    local command_file="$1"
-    local model_override="${2:-${IWE_STRATEGIST_MODEL:-}}"
-    local max_attempts="${3:-3}"
-    shift 3 || shift $#
-    local delays=(60 300)
-    if [ $# -gt 0 ]; then
-        delays=("$@")
-    fi
-    local attempt=1
-    local rc=0
-    local status_file="$LOG_DIR/${command_file}-last-status"
-
-    while [ "$attempt" -le "$max_attempts" ]; do
-        rc=0
-        # Capture only the output produced by this attempt, not stale lines
-        # from earlier scenarios in the shared daily log.
-        local log_start_bytes=0
-        if [ -f "$LOG_FILE" ]; then
-            # BSD wc pads with spaces; strip so arithmetic/tail offsets stay sane.
-            log_start_bytes=$(wc -c < "$LOG_FILE" | tr -d '[:space:]')
-            case "$log_start_bytes" in
-                ''|*[!0-9]*) log_start_bytes=0 ;;
-            esac
-        fi
-        run_claude "$command_file" "$model_override" || rc=$?
-
-        # Transient auth failure: 403/401 in this attempt's CLI output is
-        # recoverable once the VPN/credentials become available.
-        if [ "$rc" -ne 0 ] && [ "$attempt" -lt "$max_attempts" ]; then
-            local attempt_output=""
-            if [ -f "$LOG_FILE" ]; then
-                attempt_output=$(tail -c "+$((log_start_bytes + 1))" "$LOG_FILE" 2>/dev/null || true)
-            fi
-            if printf '%s\n' "$attempt_output" | grep -qiE "(Failed to authenticate|API Error: 403|401 Unauthorized|Request not allowed)"; then
-                local delay_idx=$((attempt - 1))
-                local delay=300
-                if [ "$delay_idx" -lt "${#delays[@]}" ]; then
-                    delay="${delays[$delay_idx]}"
-                elif [ "${#delays[@]}" -gt 0 ]; then
-                    delay="${delays[$((${#delays[@]} - 1))]}"
-                fi
-                log "AUTH_FAILURE scenario: $command_file (attempt $attempt/$max_attempts); retry in ${delay}s"
-                sleep "$delay"
-                attempt=$((attempt + 1))
-                continue
-            fi
-        fi
-
-        break
-    done
-
-    # Record the final outcome so the morning traffic light can distinguish a
-    # fresh failure from a stale one.
-    if [ "$rc" -eq 0 ]; then
-        printf '%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "SUCCESS" "$rc" > "$status_file"
-    else
-        printf '%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "FAILED" "$rc" > "$status_file"
-        log "RECORDED: $command_file failed with rc=$rc (see $status_file)"
-    fi
-
     return $rc
 }
 
@@ -564,29 +481,9 @@ case "$1" in
             elif bash "$DAY_OPEN_PIPELINE" >> "$LOG_FILE" 2>&1; then
                 log "Morning: Day Open pipeline OK (scaffold + llm-fill)"
             else
-                pipeline_rc=$?
-                # issue #893: exit 9 = no gateway configured (day-open-pipeline.sh
-                # §2), a case the pipeline itself already ships an answer for
-                # (--scaffold-only, issue #434) — retry with it instead of
-                # falling all the way to the free-form prompt, which ignores
-                # priorities.yaml and the scaffold (the #877 continuation:
-                # after #885 the message changed from HTTP 401 to "not
-                # configured", but strategist.sh still never used the escape
-                # hatch the pipeline's own error text already pointed at).
-                if [ "$pipeline_rc" -eq 9 ]; then
-                    log "Morning: Day Open pipeline has no gateway configured — retrying with --scaffold-only"
-                    if bash "$DAY_OPEN_PIPELINE" --scaffold-only >> "$LOG_FILE" 2>&1; then
-                        log "Morning: Day Open pipeline OK (scaffold only, no gateway)"
-                    else
-                        log "WARN: Day Open pipeline --scaffold-only also failed (see lines above in this log) — fallback to free-form day-plan prompt"
-                        run_claude "day-plan" "claude-sonnet-4-6"
-                        notify_telegram "day-plan"
-                    fi
-                else
-                    log "WARN: Day Open pipeline failed (see lines above in this log) — fallback to free-form day-plan prompt"
-                    run_claude "day-plan" "claude-sonnet-4-6"
-                    notify_telegram "day-plan"
-                fi
+                log "WARN: Day Open pipeline failed (see lines above in this log) — fallback to free-form day-plan prompt"
+                run_claude "day-plan" "claude-sonnet-4-6"
+                notify_telegram "day-plan"
             fi
         fi
         ;;
@@ -609,11 +506,7 @@ case "$1" in
             exit 0
         fi
         log "Sunday: running week review"
-        # issue #866: week-review runs at night when credentials/VPN may be
-        # transiently unavailable. Retry auth failures with backoff and leave a
-        # status file so the morning traffic light can distinguish fresh from
-        # stale failures.
-        run_claude_with_retry "week-review" "claude-opus-4-7" 3 60 300
+        run_claude "week-review" "claude-opus-4-7"
         # Fallback push for Knowledge Index (week-review creates a post there)
         # KI_REPO may not exist for all users — guard with [ -d ]
         KI_REPO="$HOME/IWE/DS-Knowledge-Index"
@@ -700,8 +593,12 @@ case "$1" in
             # for a commit that never happened.
             if git -C "$WORKSPACE" commit -m "chore: auto-cleanup processed notes from fleeting-notes.md" >> "$LOG_FILE" 2>&1; then
                 cleanup_sha=$(git -C "$WORKSPACE" rev-parse HEAD)
-                publish_commit_or_explain "strategist: cleanup" "$cleanup_sha" \
-                    "Cleanup: pushed" "WARN: cleanup ds-publish.sh failed" || true
+                if bash "$WORKSPACE/scripts/ds-publish.sh" "$WORKSPACE" normal \
+                    --reason "strategist: cleanup" --from-commit "$cleanup_sha" >> "$LOG_FILE" 2>&1; then
+                    log "Cleanup: pushed"
+                else
+                    log "WARN: cleanup ds-publish.sh failed"
+                fi
             else
                 log "WARN: cleanup git commit failed"
             fi

@@ -14,7 +14,7 @@ triggers:
   phrases: []
 routing:
   executor: sonnet
-  deterministic: false
+  deterministic: true
 agents: single
 interaction: single-step
 gates_required: []
